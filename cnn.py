@@ -1,3 +1,6 @@
+# This is cnn.py to train the ResNet18 or EfficientNet_B0 CNN model for movie poster rating regression.
+
+
 import random, pandas as pd, numpy as np, torch, torch.nn as nn
  
 from PIL import Image
@@ -7,6 +10,14 @@ from torchvision import models as models
 
 from typing import Tuple, Dict
 
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+import numpy as np
+from typing import Dict
+from datetime import datetime 
+import os
 
 def seed_all(seed: int = 42):
     random.seed(seed)
@@ -15,21 +26,36 @@ def seed_all(seed: int = 42):
     torch.cuda.manual_seed_all(seed)
 
 
- 
 class CNNConfig:
-    img_size: int = 224
-    batch_size: int = 256
-    val_batch_size: int = 64
-    epochs: int = 5
-    lr: float = 3e-4
-    weight_decay: float = 1e-4
-    seed: int = 42
-    num_workers: int = 2
-    model_name: str = "resnet18"  # swap to "efficientnet_b0" etc. if desired
-    dropout: float = 0.2
-    # normalization for ImageNet-pretrained backbones
-    mean: Tuple[float, float, float] = (0.485, 0.456, 0.406)
-    std: Tuple[float, float, float] = (0.229, 0.224, 0.225)
+    def __init__(
+        self,
+        model_name: str = "resnet18", # "efficientnet_b0" 
+        img_size: int = 224,
+        batch_size: int = 256,
+        val_batch_size: int = 64,
+        epochs: int = 5,
+        lr: float = 3e-4,
+        weight_decay: float = 1e-4,
+        seed: int = 42,
+        num_workers: int = 2,
+        dropout: float = 0.3,
+        mean=(0.485, 0.456, 0.406),
+        std=(0.229, 0.224, 0.225),
+    ):
+        self.model_name = model_name
+        self.img_size = img_size
+        self.batch_size = batch_size
+        self.val_batch_size = val_batch_size
+        self.epochs = epochs
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.seed = seed
+        self.num_workers = num_workers
+        self.dropout = dropout
+        self.mean = mean
+        self.std = std
+
+
 
 class PosterDataset(Dataset):
     """
@@ -118,7 +144,11 @@ class CNNRegressor(nn.Module):
         if name == "resnet18":
             m = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
             in_feats = m.fc.in_features
-            m.fc = nn.Identity() 
+            m.fc = nn.Identity()
+        elif name == "efficientnet_b0":
+            m = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
+            in_feats = m.classifier[1].in_features
+            m.classifier = nn.Identity()
         else:
             raise ValueError(f"Unsupported model_name: {name}")
         return m, in_feats
@@ -132,22 +162,27 @@ class CNNRegressor(nn.Module):
 
 
 class CNNTrainer:
-    def __init__(self, cfg: CNNConfig, model: CNNRegressor):
+    def __init__(self, cfg, model):
         self.cfg = cfg
         self.model = model
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
-        self.opt = torch.optim.AdamW(self.model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-        # Train directly on MAE for stability with ratings
+        self.opt = torch.optim.AdamW(
+            self.model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
+        )
         self.criterion = nn.L1Loss()
+
+        # --- TensorBoard ---
+        run_name = f"{cfg.model_name or 'CNN'}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        log_dir = os.path.join("runs", run_name)
+        self.writer = SummaryWriter(log_dir=log_dir)
 
     @torch.no_grad()
     def evaluate(self, loader: DataLoader) -> Dict[str, float]:
         self.model.eval()
         abs_err, n = 0.0, 0
         for x, y in loader:
-            x = x.to(self.device)
-            y = y.to(self.device)
+            x, y = x.to(self.device), y.to(self.device)
             pred = self.model(x)
             abs_err += torch.abs(pred - y).sum().item()
             n += y.size(0)
@@ -160,8 +195,7 @@ class CNNTrainer:
             self.model.train()
             running, n = 0.0, 0
             for x, y in train_loader:
-                x = x.to(self.device)
-                y = y.to(self.device)
+                x, y = x.to(self.device), y.to(self.device)
                 self.opt.zero_grad(set_to_none=True)
                 pred = self.model(x)
                 loss = self.criterion(pred, y)
@@ -173,15 +207,26 @@ class CNNTrainer:
 
             val_metrics = self.evaluate(val_loader)
             val_mae = val_metrics["mae"]
+
             print(f"Epoch {ep}/{self.cfg.epochs} | train MAE: {train_mae:.4f} | val MAE: {val_mae:.4f}")
+
+            # --- TensorBoard logging ---
+            self.writer.add_scalar("MAE/train", train_mae, ep)
+            self.writer.add_scalar("MAE/val", val_mae, ep)
+            # you can also log learning rate if you have a scheduler:
+            # for i, g in enumerate(self.opt.param_groups):
+            #     self.writer.add_scalar(f"LR/group_{i}", g['lr'], ep)
 
             if val_mae < best["val_mae"]:
                 best["val_mae"] = val_mae
                 best["state_dict"] = {k: v.cpu() for k, v in self.model.state_dict().items()}
 
-        # load best
+        # load best model
         if "state_dict" in best:
             self.model.load_state_dict(best["state_dict"])
+
+        # close TensorBoard writer
+        self.writer.close()
         return best
 
     @torch.no_grad()
@@ -193,22 +238,19 @@ class CNNTrainer:
             p = self.model(x).detach().cpu().numpy()
             preds.append(p)
         return np.concatenate(preds, axis=0)
+    
 
-
-# -----------------------------
-# Example usage
-# -----------------------------
 if __name__ == "__main__":
-    # Assume you already have a DataFrame `df` with columns: feature (HxWx3 nested list), overall (float)
-    # from your Kaggle dataset load.
-    # df = ...  # prepare it before running this file
 
+   # Load dataset
     from kaggleloader import KaggleLoader
     df = KaggleLoader("shivamardeshna/movies-dataset").df()
 
-
-    # Minimal demo (uncomment after providing df)
-    cfg = CNNConfig()
+    # Configuration
+    # model_name = "resnet18"
+    model_name = "efficientnet_b0"   
+    
+    cfg = CNNConfig(model_name=model_name, batch_size=256, epochs=200)  
     
     seed_all(cfg.seed)
     
@@ -223,3 +265,6 @@ if __name__ == "__main__":
     
     test_metrics = trainer.evaluate(dm.test_dataloader())
     print("Test MAE:", round(test_metrics["mae"], 4))
+
+    torch.save(model, f"models/{model_name}.pth")
+

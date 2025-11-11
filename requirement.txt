@@ -8,3 +8,5 @@ pip install matplotlib
 pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 pip install transformers datasets accelerate evaluate timm
 pip install scikit-learn pandas matplotlib tqdm pillow
+pip install torch torchvision
+pip install tensorboard
