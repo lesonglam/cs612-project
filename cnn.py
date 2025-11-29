@@ -1,8 +1,7 @@
 # This is cnn.py to train the ResNet18 or EfficientNet_B0 CNN model for movie poster rating regression.
 
-
 import random, pandas as pd, numpy as np, torch, torch.nn as nn
- 
+
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms   as T

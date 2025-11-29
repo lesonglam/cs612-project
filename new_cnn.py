@@ -78,7 +78,9 @@ class PosterDataset(Dataset):
       - 'IMDB Score': float rating
     """
     def __init__(self, frame: pd.DataFrame, transform: T.Compose):
-        self.df = frame.reset_index(drop=True).copy()
+        frame = frame.copy()
+        frame["IMDB Score"] = frame["IMDB Score"].astype(float)
+        self.df = frame.reset_index(drop=True)
         self.tfm = transform
 
     def __len__(self) -> int:
@@ -305,6 +307,7 @@ if __name__ == "__main__":
     # Load dataset from local Kaggle cache
     loader = KaggleLoader("neha1703/movie-genre-from-its-poster")
     df = loader.df()  
+    df = df.dropna(subset=["local_path", "IMDB Score"])
 
     model_name = "resnet18"  # "resnet50", "efficientnet_b0"
  
@@ -312,7 +315,7 @@ if __name__ == "__main__":
     cfg = CNNConfig(
         model_name=model_name,
         batch_size=128,
-        epochs=20,
+        epochs=50,
         pretrained_weights=True,
     )
  
@@ -332,4 +335,4 @@ if __name__ == "__main__":
     print("Test MAE:", round(test_metrics["mae"], 4))
 
     os.makedirs("models", exist_ok=True)
-    torch.save(model.state_dict(), f"models/{cfg.model_name}.pth")
+    torch.save(model.state_dict(), f"models/imdb_reg_{cfg.model_name}.pth")

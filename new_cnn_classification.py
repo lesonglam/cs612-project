@@ -278,7 +278,7 @@ class CNNTrainer:
         # multi-label classification loss
         self.criterion = nn.BCEWithLogitsLoss()
 
-        run_name = f"{cfg.model_name}_genres_{datetime.now().strftime('%Y%m%d-%H%M%S')}_bs{cfg.batch_size}_ep{cfg.epochs}"
+        run_name = f"{cfg.model_name}_genres_{datetime.now().strftime('%Y%m%d-%H%M%S')}_bs{cfg.batch_size}_ep{cfg.epochs}_pretrained"
         log_dir = os.path.join("runs", run_name)
         self.writer = SummaryWriter(log_dir=log_dir)
 
@@ -397,7 +397,7 @@ if __name__ == "__main__":
         model_name=model_name,
         batch_size=128,
         epochs=25,
-        pretrained_weights=False,
+        pretrained_weights=True,
     )
 
     seed_all(cfg.seed)
@@ -417,4 +417,4 @@ if __name__ == "__main__":
     print("Test F1:", round(test_metrics["f1"], 4))
 
     os.makedirs("models", exist_ok=True)
-    torch.save(model.state_dict(), f"models/{cfg.model_name}_genres.pth")
+    torch.save(model.state_dict(), f"models/{cfg.model_name}_genres_pretrained.pth")
