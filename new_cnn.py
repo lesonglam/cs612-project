@@ -1,23 +1,26 @@
-# This is cnn.py to train the ResNet18 or EfficientNet_B0 CNN model for movie poster rating regression.
+# cnn_poster_regression.py
+# Train ResNet18 / ResNet50 / EfficientNet_B0 on movie poster -> IMDB score regression.
 
+import os
+import random
+from datetime import datetime
+from typing import Dict
 
-import random, pandas as pd, numpy as np, torch, torch.nn as nn
- 
+import numpy as np
+import pandas as pd
 from PIL import Image
-from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms   as T
-from torchvision import models as models
-
-from typing import Tuple, Dict
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
-import numpy as np
-from typing import Dict
-from datetime import datetime 
-import os
+import torchvision.transforms as T
+from torchvision import models
+
+
+# --------------------------------------------------------
+# Utils
+# --------------------------------------------------------
 
 def seed_all(seed: int = 42):
     random.seed(seed)
@@ -26,14 +29,18 @@ def seed_all(seed: int = 42):
     torch.cuda.manual_seed_all(seed)
 
 
+# --------------------------------------------------------
+# Config
+# --------------------------------------------------------
+
 class CNNConfig:
     def __init__(
         self,
-        model_name: str = "resnet18", # "efficientnet_b0" 
+        model_name: str = "resnet18",   # "resnet18", "resnet50", "efficientnet_b0"
         img_size: int = 224,
-        batch_size: int = 256,
+        batch_size: int = 128,
         val_batch_size: int = 64,
-        epochs: int = 5,
+        epochs: int = 20,
         lr: float = 3e-4,
         weight_decay: float = 1e-4,
         seed: int = 42,
@@ -55,15 +62,20 @@ class CNNConfig:
         self.dropout = dropout
         self.mean = mean
         self.std = std
-        self.pretrained_weights = pretrained_weights  # Set to False to train from scratch
+        self.pretrained_weights = pretrained_weights
 
 
+# --------------------------------------------------------
+# Dataset / DataModule
+# --------------------------------------------------------
 
 class PosterDataset(Dataset):
     """
-    Expects a DataFrame with columns:
-    - 'feature': nested list (H x W x 3) RGB poster
-    - 'overall': float rating
+    Dataset for MovieGenre.csv + downloaded posters.
+
+    Expects DataFrame with columns:
+      - 'local_path': path to poster image file (jpg)
+      - 'IMDB Score': float rating
     """
     def __init__(self, frame: pd.DataFrame, transform: T.Compose):
         self.df = frame.reset_index(drop=True).copy()
@@ -73,30 +85,39 @@ class PosterDataset(Dataset):
         return len(self.df)
 
     def __getitem__(self, idx: int):
-        arr = np.array(self.df.loc[idx, "feature"], dtype=np.uint8)  # H x W x 3
-        img = Image.fromarray(arr, mode="RGB")
-        x = self.tfm(img)                                            # C x H x W
-        y = torch.tensor(self.df.loc[idx, "overall"], dtype=torch.float32)
+        row = self.df.loc[idx]
+        img_path = row["local_path"]
+
+        # Load image
+        img = Image.open(img_path).convert("RGB")
+        x = self.tfm(img)  # C x H x W
+
+        # Target: IMDB score
+        y = torch.tensor(row["IMDB Score"], dtype=torch.float32)
         return x, y
-    
-    
+
+
 class CNNDataModule:
     def __init__(self, df: pd.DataFrame, cfg: CNNConfig):
-        self.df = df.dropna(subset=["feature", "overall"]).reset_index(drop=True)
+        # Keep only rows with image path and score
+        self.df = df.dropna(subset=["local_path", "IMDB Score"]).reset_index(drop=True)
+        # Also filter to existing files, in case some images failed to download
+        self.df = self.df[self.df["local_path"].apply(os.path.exists)].reset_index(drop=True)
+
         self.cfg = cfg
         self.train_df: pd.DataFrame | None = None
         self.val_df: pd.DataFrame | None = None
         self.test_df: pd.DataFrame | None = None
 
         self.train_tf = T.Compose([
-            T.ToTensor(),
             T.Resize((cfg.img_size, cfg.img_size)),
             T.RandomHorizontalFlip(),
+            T.ToTensor(),
             T.Normalize(mean=cfg.mean, std=cfg.std),
         ])
         self.eval_tf = T.Compose([
-            T.ToTensor(),
             T.Resize((cfg.img_size, cfg.img_size)),
+            T.ToTensor(),
             T.Normalize(mean=cfg.mean, std=cfg.std),
         ])
 
@@ -105,33 +126,56 @@ class CNNDataModule:
         seed_all(self.cfg.seed)
 
         train_df, tmp_df = train_test_split(
-            self.df, test_size=val_size + test_size, random_state=self.cfg.seed, shuffle=True
+            self.df, test_size=val_size + test_size,
+            random_state=self.cfg.seed, shuffle=True
         )
         rel_val = val_size / (val_size + test_size) if (val_size + test_size) > 0 else 0.5
         val_df, test_df = train_test_split(
-            tmp_df, test_size=1 - rel_val, random_state=self.cfg.seed, shuffle=True
+            tmp_df, test_size=1 - rel_val,
+            random_state=self.cfg.seed, shuffle=True
         )
         self.train_df, self.val_df, self.test_df = train_df, val_df, test_df
 
+        print(f"Train: {len(self.train_df)}, Val: {len(self.val_df)}, Test: {len(self.test_df)}")
+
     def train_dataloader(self) -> DataLoader:
         ds = PosterDataset(self.train_df, self.train_tf)
-        return DataLoader(ds, batch_size=self.cfg.batch_size, shuffle=True,
-                          num_workers=self.cfg.num_workers, pin_memory=True)
+        return DataLoader(
+            ds,
+            batch_size=self.cfg.batch_size,
+            shuffle=True,
+            num_workers=self.cfg.num_workers,
+            pin_memory=True,
+        )
 
     def val_dataloader(self) -> DataLoader:
         ds = PosterDataset(self.val_df, self.eval_tf)
-        return DataLoader(ds, batch_size=self.cfg.val_batch_size, shuffle=False,
-                          num_workers=self.cfg.num_workers, pin_memory=False)
+        return DataLoader(
+            ds,
+            batch_size=self.cfg.val_batch_size,
+            shuffle=False,
+            num_workers=self.cfg.num_workers,
+            pin_memory=False,
+        )
 
     def test_dataloader(self) -> DataLoader:
         ds = PosterDataset(self.test_df, self.eval_tf)
-        return DataLoader(ds, batch_size=self.cfg.val_batch_size, shuffle=False,
-                          num_workers=self.cfg.num_workers, pin_memory=False)
-    
+        return DataLoader(
+            ds,
+            batch_size=self.cfg.val_batch_size,
+            shuffle=False,
+            num_workers=self.cfg.num_workers,
+            pin_memory=False,
+        )
+
+
+# --------------------------------------------------------
+# Model
+# --------------------------------------------------------
 
 class CNNRegressor(nn.Module):
     """
-    Wraps an ImageNet-pretrained CNN and replaces the head for 1-D regression (rating).
+    Wraps an ImageNet-pretrained CNN and replaces the head for 1-D regression (IMDB score).
     """
     def __init__(self, cfg: CNNConfig):
         super().__init__()
@@ -139,10 +183,10 @@ class CNNRegressor(nn.Module):
         self.backbone, in_feats = self._build_backbone(cfg.model_name, cfg.pretrained_weights)
         self.head = nn.Sequential(
             nn.Dropout(cfg.dropout),
-            nn.Linear(in_feats, 1)
+            nn.Linear(in_feats, 1),
         )
 
-    def _build_backbone(self, name: str, pretrained_weights: bool = True) :
+    def _build_backbone(self, name: str, pretrained_weights: bool = True):
         if name == "resnet18":
             if pretrained_weights:
                 m = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
@@ -154,7 +198,7 @@ class CNNRegressor(nn.Module):
         elif name == "resnet50":
             if pretrained_weights:
                 m = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
-            else: 
+            else:
                 m = models.resnet50(weights=None)
             in_feats = m.fc.in_features
             m.fc = nn.Identity()
@@ -164,31 +208,38 @@ class CNNRegressor(nn.Module):
                 m = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
             else:
                 m = models.efficientnet_b0(weights=None)
-
             in_feats = m.classifier[1].in_features
             m.classifier = nn.Identity()
+
         else:
             raise ValueError(f"Unsupported model_name: {name}")
+
         return m, in_feats
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         feats = self.backbone(x)
-        out = self.head(feats)           # (B, 1)
-        return out.squeeze(1)            # (B,)
+        out = self.head(feats)      # (B, 1)
+        return out.squeeze(1)       # (B,)
+
+
+# --------------------------------------------------------
+# Trainer
+# --------------------------------------------------------
 
 class CNNTrainer:
-    def __init__(self, cfg, model):
+    def __init__(self, cfg: CNNConfig, model: nn.Module):
         self.cfg = cfg
         self.model = model
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
         self.opt = torch.optim.AdamW(
-            self.model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
+            self.model.parameters(),
+            lr=cfg.lr,
+            weight_decay=cfg.weight_decay,
         )
-        self.criterion = nn.L1Loss()
+        self.criterion = nn.L1Loss()  # MAE loss
 
-        # --- TensorBoard ---
-        run_name = f"{cfg.model_name or 'CNN'}_{datetime.now().strftime('%Y%m%d-%H%M%S')}_batch{cfg.batch_size}_ep{cfg.epochs}"
+        run_name = f"{cfg.model_name}_{datetime.now().strftime('%Y%m%d-%H%M%S')}_bs{cfg.batch_size}_ep{cfg.epochs}"
         log_dir = os.path.join("runs", run_name)
         self.writer = SummaryWriter(log_dir=log_dir)
 
@@ -218,29 +269,23 @@ class CNNTrainer:
                 self.opt.step()
                 running += loss.item() * y.size(0)
                 n += y.size(0)
-            train_mae = running / max(n, 1)
 
+            train_mae = running / max(n, 1)
             val_metrics = self.evaluate(val_loader)
             val_mae = val_metrics["mae"]
 
             print(f"Epoch {ep}/{self.cfg.epochs} | train MAE: {train_mae:.4f} | val MAE: {val_mae:.4f}")
 
-            # --- TensorBoard logging ---
             self.writer.add_scalar("MAE/train", train_mae, ep)
             self.writer.add_scalar("MAE/val", val_mae, ep)
-            # you can also log learning rate if you have a scheduler:
-            # for i, g in enumerate(self.opt.param_groups):
-            #     self.writer.add_scalar(f"LR/group_{i}", g['lr'], ep)
 
             if val_mae < best["val_mae"]:
                 best["val_mae"] = val_mae
                 best["state_dict"] = {k: v.cpu() for k, v in self.model.state_dict().items()}
 
-        # load best model
         if "state_dict" in best:
             self.model.load_state_dict(best["state_dict"])
 
-        # close TensorBoard writer
         self.writer.close()
         return best
 
@@ -253,43 +298,38 @@ class CNNTrainer:
             p = self.model(x).detach().cpu().numpy()
             preds.append(p)
         return np.concatenate(preds, axis=0)
-    
 
 if __name__ == "__main__":
+    from new_kaggleloader import KaggleLoader  # your loader that adds 'local_path'
 
-   # Load dataset
-    from kaggleloader import KaggleLoader
+    # Load dataset from local Kaggle cache
+    loader = KaggleLoader("neha1703/movie-genre-from-its-poster")
+    df = loader.df()  
 
-    # path_dataset = "shivamardeshna/movies-dataset/Data_s_E5"
-    path_dataset = "preprocessed/movies_mean_by_asin.pkl"
-
-    df = KaggleLoader(path_dataset).df()
-
-    # Configuration
-    model_name = "resnet18" 
-    cfg = CNNConfig(model_name=model_name, batch_size=256, epochs=50, pretrained_weights=True)
-
-    # Configuration
-    # model_name = "resnet50" 
-    # cfg = CNNConfig(model_name=model_name, batch_size=256, epochs=50, pretrained_weights=True)
-
-
-    # model_name = "efficientnet_b0"    
-    # cfg = CNNConfig(model_name=model_name, batch_size=256, epochs=50)
-    
+    model_name = "resnet18"  # "resnet50", "efficientnet_b0"
+ 
+    # Config: train ResNet18
+    cfg = CNNConfig(
+        model_name=model_name,
+        batch_size=128,
+        epochs=20,
+        pretrained_weights=True,
+    )
+ 
     seed_all(cfg.seed)
-    
+
     dm = CNNDataModule(df, cfg)
     dm.setup(val_size=0.1, test_size=0.1)
-    
+
     model = CNNRegressor(cfg)
     trainer = CNNTrainer(cfg, model)
-    
-    best = trainer.fit(train_loader= dm.train_dataloader(), val_loader= dm.val_dataloader())
+
+    best = trainer.fit(train_loader=dm.train_dataloader(),
+                       val_loader=dm.val_dataloader())
     print("Best val MAE:", best["val_mae"])
-    
+
     test_metrics = trainer.evaluate(dm.test_dataloader())
     print("Test MAE:", round(test_metrics["mae"], 4))
 
-    torch.save(model.state_dict(), f"models/{model_name}.pth")
-
+    os.makedirs("models", exist_ok=True)
+    torch.save(model.state_dict(), f"models/{cfg.model_name}.pth")
