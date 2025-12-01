@@ -396,7 +396,7 @@ if __name__ == "__main__":
     cfg = CNNConfig(
         model_name=model_name,
         batch_size=128,
-        epochs=25,
+        epochs=50,
         pretrained_weights=True,
     )
 
@@ -418,3 +418,4 @@ if __name__ == "__main__":
 
     os.makedirs("models", exist_ok=True)
     torch.save(model.state_dict(), f"models/{cfg.model_name}_genres_pretrained.pth")
+    print(f"Model saved to models/{cfg.model_name}_genres_pretrained.pth")
